@@ -202,8 +202,42 @@ def probe_vram_used_gb(cfg: Config) -> float | None:
 # Pylon lifecycle
 # =============================================================================
 
+class RegisterError(RuntimeError):
+    """Raised by register() on any non-200 response so callers can retry."""
+
+
+def register_with_retry(cfg: Config, log: logging.Logger,
+                        stop_fn=lambda: False) -> tuple[str, str]:
+    """Block until register() succeeds OR stop_fn() returns True.
+
+    Used at startup so the mini-node doesn't crashloop under
+    `Restart=always` when pylon isn't reachable yet. Exponential backoff
+    capped at 60s (pattern: 2, 4, 8, 16, 32, 60, 60, ...). Logs a single
+    'first time' line and then quiets down with one line per retry.
+    """
+    delay = 2.0
+    while not stop_fn():
+        try:
+            return register(cfg, log)
+        except RegisterError as e:
+            log.warning(f"register failed ({e}); retrying in {delay:.0f}s")
+        except Exception as e:
+            log.warning(f"register exception ({e!r}); retrying in {delay:.0f}s")
+        # Sleep with early stop_fn check.
+        slept = 0.0
+        while slept < delay and not stop_fn():
+            time.sleep(min(0.5, delay - slept))
+            slept += 0.5
+        delay = min(delay * 2, 60.0)
+    raise SystemExit(130)  # stopped before we could register
+
+
 def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
-    """POST /v1/nodes/register. Returns (node_id, node_token)."""
+    """POST /v1/nodes/register. Returns (node_id, node_token).
+
+    Raises RegisterError on non-200 from pylon so callers (notably
+    register_with_retry) can decide whether to retry or give up.
+    """
     body: dict[str, Any] = {
         "name": cfg.name,
         "pool": cfg.pool,
@@ -237,8 +271,8 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
     res = http_json("POST", f"{cfg.pylon_url}/v1/nodes/register", body,
                     token=cfg.register_key)
     if res.status != 200:
-        raise SystemExit(
-            f"register failed: status={res.status} body={res.body}"
+        raise RegisterError(
+            f"status={res.status} body={res.body}"
         )
     node_id = res.body["node"]["id"]
     node_token = res.body["node_token"]
@@ -334,28 +368,37 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    node_id, node_token = register(cfg, log)
+    # Patient first register so we don't crashloop under Restart=always if
+    # pylon isn't reachable yet (or its admin key isn't set on the box
+    # yet). Same helper handles re-register on heartbeat 404 / repeated
+    # failures so the in-flight path is also patient.
+    node_id, node_token = register_with_retry(cfg, log, stop_fn=lambda: _stop)
+    if _stop:
+        return 130
 
     failures = 0
     while not _stop:
         try:
             ok = heartbeat(cfg, node_id, node_token, log)
             if not ok:
-                # Pylon dropped us — re-register.
-                node_id, node_token = register(cfg, log)
+                # Pylon dropped us — re-register patiently.
+                node_id, node_token = register_with_retry(
+                    cfg, log, stop_fn=lambda: _stop)
+                if _stop:
+                    break
                 failures = 0
             else:
                 failures = 0
         except Exception as e:
             failures += 1
             log.warning(f"heartbeat exception ({failures}): {e!r}")
-            # After 3 consecutive failures, also try re-register.
+            # After 3 consecutive failures, force re-register.
             if failures >= 3:
-                try:
-                    node_id, node_token = register(cfg, log)
-                    failures = 0
-                except Exception as re:
-                    log.error(f"re-register failed: {re!r}")
+                node_id, node_token = register_with_retry(
+                    cfg, log, stop_fn=lambda: _stop)
+                if _stop:
+                    break
+                failures = 0
         # Sleep with early-exit on stop.
         for _ in range(int(cfg.heartbeat_seconds * 10)):
             if _stop:

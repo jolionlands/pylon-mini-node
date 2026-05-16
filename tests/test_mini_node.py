@@ -200,10 +200,91 @@ class RegisterTest(unittest.TestCase):
         self.assertEqual(body["vram_gb"], 8.0)
         self.assertEqual(body["node_type"], "single_b70")
 
-    def test_register_failure_raises_systemexit(self):
+    def test_register_failure_raises_register_error(self):
+        """v0.2: failure now raises RegisterError (not SystemExit) so the
+        retry helper can catch and back off."""
         self.fake.register_status = 500
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(mn.RegisterError):
             mn.register(self.cfg, self.log)
+
+
+class RegisterWithRetryTest(unittest.TestCase):
+    """v0.2: patient startup. Mini-node retries register() with exponential
+    backoff so it doesn't crashloop when pylon isn't reachable yet."""
+
+    def setUp(self):
+        self.fake = FakePylon()
+        self.cfg = _cfg(pylon_url=self.fake.base_url, base_url=self.fake.base_url)
+        self.log = mn.logging.getLogger("test")
+        # Patch time.sleep so retry waits are instant. The helper's
+        # backoff also uses time.sleep, so this short-circuits both.
+        self._real_sleep = mn.time.sleep
+        mn.time.sleep = lambda _s: None
+
+    def tearDown(self):
+        self.fake.stop()
+        mn.time.sleep = self._real_sleep
+
+    def test_succeeds_on_first_try(self):
+        node_id, token = mn.register_with_retry(self.cfg, self.log)
+        self.assertEqual(node_id, "n-1")
+        self.assertEqual(token, "tok-n-1")
+        self.assertEqual(len(self.fake.calls), 1)
+
+    def test_retries_through_failures_then_succeeds(self):
+        # First two attempts fail; third succeeds.
+        attempts = {"n": 0}
+
+        def flaky_post(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                return mn.HTTPResult(503, {"error": "warming"})
+            # Defer to real http_json for the success call.
+            return real_http(*args, **kwargs)
+
+        real_http = mn.http_json
+        mn.http_json = flaky_post
+        try:
+            node_id, token = mn.register_with_retry(self.cfg, self.log)
+        finally:
+            mn.http_json = real_http
+        self.assertEqual(node_id, "n-1")
+        self.assertGreaterEqual(attempts["n"], 3)
+
+    def test_honors_stop_fn(self):
+        # Stop after 2 retries.
+        stop_count = {"n": 0}
+
+        def stop_fn():
+            stop_count["n"] += 1
+            return stop_count["n"] > 2
+
+        self.fake.register_status = 500
+        with self.assertRaises(SystemExit) as cm:
+            mn.register_with_retry(self.cfg, self.log, stop_fn=stop_fn)
+        self.assertEqual(cm.exception.code, 130)
+
+    def test_backoff_cap_is_60s(self):
+        # Patch sleep to record durations instead of running them.
+        recorded = []
+        mn.time.sleep = lambda s: recorded.append(s)
+
+        stop_count = {"n": 0}
+        def stop_fn():
+            stop_count["n"] += 1
+            return stop_count["n"] > 30  # let many retries happen
+
+        self.fake.register_status = 500
+        try:
+            mn.register_with_retry(self.cfg, self.log, stop_fn=stop_fn)
+        except SystemExit:
+            pass
+        # The helper sleeps in 0.5s chunks while accumulating to `delay`,
+        # and delay is doubled per failure capped at 60. So the largest
+        # individual sleep call should never exceed 0.5, and the running
+        # cumulative wait between attempts should be <= 60s.
+        self.assertTrue(all(s <= 0.5 + 1e-9 for s in recorded),
+                        f"a sleep exceeded 0.5s: {[s for s in recorded if s > 0.5]}")
 
 
 class HeartbeatTest(unittest.TestCase):
@@ -323,7 +404,8 @@ class EngineProbeTest(unittest.TestCase):
 def _run_all():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for cls in (ConfigTest, RegisterTest, HeartbeatTest, DeregisterTest, EngineProbeTest):
+    for cls in (ConfigTest, RegisterTest, RegisterWithRetryTest,
+                HeartbeatTest, DeregisterTest, EngineProbeTest):
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
