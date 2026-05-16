@@ -1,0 +1,25 @@
+[Unit]
+Description=pylon-mini-node — register this box as a pylon inference node
+Documentation=https://github.com/jolionlands/pylon-mini-node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/pylon-mini-node.env
+ExecStart=/usr/bin/python3 /opt/pylon-mini-node/pylon_mini_node.py
+Restart=always
+RestartSec=5
+
+# Hardening — mini-node only needs outbound HTTP + sysfs read.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadOnlyPaths=/opt/pylon-mini-node
+
+# If you set NODE_VRAM_SYSFS_CARD, the agent reads VRAM from sysfs.
+# /sys is read-only by default, so this is fine.
+
+[Install]
+WantedBy=multi-user.target

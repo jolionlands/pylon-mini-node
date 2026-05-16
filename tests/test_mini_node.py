@@ -1,0 +1,334 @@
+"""Tests for pylon-mini-node.
+
+Standalone-runner style (mirrors pascal-fleet / pylon patterns). Each test
+file has a `_run_all()` main so `python tests/test_mini_node.py` works
+without pytest. pytest also works.
+
+We mock pylon over a small stdlib HTTP server so the tests are hermetic.
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pylon_mini_node as mn
+
+
+# =============================================================================
+# Fake pylon server — records calls + lets tests force responses
+# =============================================================================
+
+class _FakePylonHandler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def _read_body(self) -> dict:
+        n = int(self.headers.get("content-length") or 0)
+        raw = self.rfile.read(n) if n else b""
+        return json.loads(raw) if raw else {}
+
+    def _reply(self, code: int, body):
+        raw = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_POST(self):
+        srv: "FakePylon" = self.server.fake  # type: ignore[attr-defined]
+        path = self.path
+        body = self._read_body()
+        token = self.headers.get("authorization", "").replace("Bearer ", "")
+        srv.calls.append((path, body, token))
+
+        if path == "/v1/nodes/register":
+            if srv.register_status != 200:
+                return self._reply(srv.register_status,
+                                   {"error": {"message": "fake"}})
+            srv.next_node_id += 1
+            node_id = f"n-{srv.next_node_id}"
+            return self._reply(200, {
+                "node": {"id": node_id, "name": body.get("name"),
+                         "pool": body.get("pool"), "tiers": body.get("tiers"),
+                         "upstream_models": body.get("upstream_models")},
+                "node_token": f"tok-{node_id}",
+                "warning": "store this now",
+            })
+        if path.startswith("/v1/nodes/") and path.endswith("/heartbeat"):
+            if srv.heartbeat_status != 200:
+                return self._reply(srv.heartbeat_status,
+                                   {"error": {"message": "fake"}})
+            return self._reply(200, {"node": {"id": path.split("/")[3]}})
+        if path.startswith("/v1/nodes/") and path.endswith("/deregister"):
+            return self._reply(200, {"ok": True})
+        return self._reply(404, {"error": "unknown path"})
+
+    def do_GET(self):
+        # Engine endpoints proxied through the fake when needed
+        srv: "FakePylon" = self.server.fake  # type: ignore[attr-defined]
+        if self.path == "/v1/models":
+            if srv.engine_alive:
+                return self._reply(200, {"data": [{"id": "fake"}]})
+            return self._reply(503, {"error": "down"})
+        if self.path == "/slots":
+            return self._reply(200, srv.slots_body)
+        return self._reply(404, {"error": "unknown"})
+
+
+class FakePylon:
+    def __init__(self):
+        self.calls: list[tuple] = []
+        self.next_node_id = 0
+        self.register_status = 200
+        self.heartbeat_status = 200
+        self.engine_alive = True
+        self.slots_body: list[dict] = []
+        self._srv = HTTPServer(("127.0.0.1", 0), _FakePylonHandler)
+        self._srv.fake = self  # type: ignore[attr-defined]
+        self._th = threading.Thread(target=self._srv.serve_forever, daemon=True)
+        self._th.start()
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._srv.server_address[1]}"
+
+    def stop(self):
+        self._srv.shutdown()
+        self._th.join(timeout=2)
+
+
+# =============================================================================
+# Config
+# =============================================================================
+
+def _cfg(**overrides):
+    """Build a Config without needing real env vars."""
+    base = dict(
+        pylon_url="http://127.0.0.1:9999",
+        register_key="reg-key",
+        name="test-node",
+        pool="default",
+        tiers=("fast",),
+        upstream_models=("test-model",),
+        base_url="http://127.0.0.1:9998",
+        engine_api_key=None,
+        max_concurrency=4,
+        node_type=None,
+        gpu=None,
+        vram_gb=None,
+        engine_kind="llama_cpp",
+        heartbeat_seconds=0.05,
+        vram_sysfs_card=None,
+    )
+    base.update(overrides)
+    return mn.Config(**base)
+
+
+# =============================================================================
+# Tests
+# =============================================================================
+
+class ConfigTest(unittest.TestCase):
+    def test_from_env_requires_pylon_url(self):
+        for k in ("PYLON_URL", "PYLON_NODE_KEY", "NODE_NAME", "NODE_BASE_URL"):
+            os.environ.pop(k, None)
+        with self.assertRaises(SystemExit) as cm:
+            mn.Config.from_env()
+        # SystemExit msg should name a missing env var
+        self.assertIn("PYLON_URL", str(cm.exception))
+
+    def test_from_env_parses_tuples(self):
+        os.environ.update({
+            "PYLON_URL": "http://x", "PYLON_NODE_KEY": "k",
+            "NODE_NAME": "n", "NODE_BASE_URL": "http://y",
+            "NODE_TIERS": "fast, long ,deep",
+            "NODE_UPSTREAM_MODELS": "a,b",
+        })
+        try:
+            c = mn.Config.from_env()
+            self.assertEqual(c.tiers, ("fast", "long", "deep"))
+            self.assertEqual(c.upstream_models, ("a", "b"))
+            self.assertEqual(c.pylon_url, "http://x")
+        finally:
+            for k in ("PYLON_URL", "PYLON_NODE_KEY", "NODE_NAME",
+                      "NODE_BASE_URL", "NODE_TIERS", "NODE_UPSTREAM_MODELS"):
+                os.environ.pop(k, None)
+
+
+class RegisterTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakePylon()
+        self.cfg = _cfg(pylon_url=self.fake.base_url, base_url=self.fake.base_url)
+        self.log = mn.logging.getLogger("test")
+
+    def tearDown(self):
+        self.fake.stop()
+
+    def test_register_returns_id_and_token(self):
+        node_id, token = mn.register(self.cfg, self.log)
+        self.assertEqual(node_id, "n-1")
+        self.assertEqual(token, "tok-n-1")
+        # Body contract: name, pool, tiers, upstream_models, base_url present.
+        path, body, _ = self.fake.calls[0]
+        self.assertEqual(path, "/v1/nodes/register")
+        self.assertEqual(body["name"], "test-node")
+        self.assertEqual(body["pool"], "default")
+        self.assertEqual(body["tiers"], ["fast"])
+        self.assertEqual(body["upstream_models"], ["test-model"])
+        self.assertEqual(body["base_url"], self.cfg.base_url)
+        self.assertEqual(body["max_concurrency"], 4)
+        # engines list is built from upstream_models for prefix-affinity indexing
+        self.assertEqual(len(body["engines"]), 1)
+        self.assertEqual(body["engines"][0]["model"], "test-model")
+
+    def test_register_includes_optional_caps(self):
+        cfg = _cfg(pylon_url=self.fake.base_url, base_url=self.fake.base_url,
+                   gpu="Vega56", vram_gb=8.0, node_type="single_b70")
+        mn.register(cfg, self.log)
+        path, body, _ = self.fake.calls[0]
+        self.assertEqual(body["gpu"], "Vega56")
+        self.assertEqual(body["gpu_count"], 1)
+        self.assertEqual(body["vram_gb"], 8.0)
+        self.assertEqual(body["node_type"], "single_b70")
+
+    def test_register_failure_raises_systemexit(self):
+        self.fake.register_status = 500
+        with self.assertRaises(SystemExit):
+            mn.register(self.cfg, self.log)
+
+
+class HeartbeatTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakePylon()
+        # Use the fake's port for BOTH pylon AND the engine, so /v1/models +
+        # /slots both work — register goes to /v1/nodes/register, engine probes
+        # go to /v1/models on the same fake.
+        self.cfg = _cfg(pylon_url=self.fake.base_url, base_url=self.fake.base_url)
+        self.log = mn.logging.getLogger("test")
+        self.fake.engine_alive = True
+        self.fake.slots_body = []
+
+    def tearDown(self):
+        self.fake.stop()
+
+    def test_heartbeat_200_with_in_flight_zero(self):
+        node_id, token = mn.register(self.cfg, self.log)
+        self.fake.calls.clear()
+        ok = mn.heartbeat(self.cfg, node_id, token, self.log)
+        self.assertTrue(ok)
+        path, body, hb_token = self.fake.calls[0]
+        self.assertEqual(path, f"/v1/nodes/{node_id}/heartbeat")
+        self.assertEqual(hb_token, token)
+        self.assertEqual(body["in_flight"], 0)
+        self.assertEqual(body["state"], "ready")
+
+    def test_heartbeat_404_returns_false(self):
+        node_id, token = mn.register(self.cfg, self.log)
+        self.fake.heartbeat_status = 404
+        ok = mn.heartbeat(self.cfg, node_id, token, self.log)
+        self.assertFalse(ok)
+
+    def test_heartbeat_counts_busy_slots(self):
+        # 3 of 4 slots are processing — heartbeat must report in_flight=3.
+        self.fake.slots_body = [
+            {"id": 0, "is_processing": True},
+            {"id": 1, "is_processing": True},
+            {"id": 2, "is_processing": False},
+            {"id": 3, "is_processing": True},
+        ]
+        node_id, token = mn.register(self.cfg, self.log)
+        self.fake.calls.clear()
+        mn.heartbeat(self.cfg, node_id, token, self.log)
+        _, body, _ = self.fake.calls[0]
+        self.assertEqual(body["in_flight"], 3)
+
+    def test_heartbeat_state_stopped_when_engine_down(self):
+        self.fake.engine_alive = False
+        node_id, token = mn.register(self.cfg, self.log)
+        self.fake.calls.clear()
+        mn.heartbeat(self.cfg, node_id, token, self.log)
+        _, body, _ = self.fake.calls[0]
+        self.assertEqual(body["state"], "stopped")
+
+
+class DeregisterTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakePylon()
+        self.cfg = _cfg(pylon_url=self.fake.base_url, base_url=self.fake.base_url)
+        self.log = mn.logging.getLogger("test")
+
+    def tearDown(self):
+        self.fake.stop()
+
+    def test_deregister_uses_node_token(self):
+        node_id, token = mn.register(self.cfg, self.log)
+        self.fake.calls.clear()
+        mn.deregister(self.cfg, node_id, token, self.log)
+        path, _, hb_token = self.fake.calls[0]
+        self.assertEqual(path, f"/v1/nodes/{node_id}/deregister")
+        self.assertEqual(hb_token, token)
+
+
+class EngineProbeTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakePylon()
+        self.cfg = _cfg(pylon_url=self.fake.base_url, base_url=self.fake.base_url)
+
+    def tearDown(self):
+        self.fake.stop()
+
+    def test_probe_engine_alive_true(self):
+        self.fake.engine_alive = True
+        self.assertTrue(mn.probe_engine_alive(self.cfg))
+
+    def test_probe_engine_alive_false(self):
+        self.fake.engine_alive = False
+        self.assertFalse(mn.probe_engine_alive(self.cfg))
+
+    def test_probe_in_flight_handles_old_task_id_shape(self):
+        # Older llama-server builds use task_id != -1 instead of is_processing.
+        self.fake.slots_body = [
+            {"id": 0, "task_id": 42},
+            {"id": 1, "task_id": -1},
+            {"id": 2, "task_id": 1337},
+        ]
+        self.assertEqual(mn.probe_in_flight(self.cfg), 2)
+
+    def test_probe_in_flight_zero_on_engine_error(self):
+        # Wrong base_url — should NOT throw, just return 0.
+        cfg = _cfg(base_url="http://127.0.0.1:1")
+        self.assertEqual(mn.probe_in_flight(cfg), 0)
+
+    def test_probe_vram_used_gb_reads_sysfs(self, tmp_dir=None):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            # Fake sysfs card directory.
+            with open(os.path.join(d, "mem_info_vram_used"), "w") as f:
+                # 5 GiB in bytes.
+                f.write(str(5 * (1024 ** 3)))
+            cfg = _cfg(vram_sysfs_card=d)
+            v = mn.probe_vram_used_gb(cfg)
+            self.assertAlmostEqual(v, 5.0, places=2)
+
+
+def _run_all():
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    for cls in (ConfigTest, RegisterTest, HeartbeatTest, DeregisterTest, EngineProbeTest):
+        suite.addTests(loader.loadTestsFromTestCase(cls))
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite)
+    return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(_run_all())
