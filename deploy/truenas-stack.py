@@ -154,16 +154,21 @@ def main() -> int:
             "&& rm -f /tmp/_pylon_keys", sudo=True)
         print(f"  generated fresh keys; persisted to /etc/pylon-keys 0600 root")
 
-    # 4. Start pylon container with --network host (critical — see header)
-    print("[4/6] start pylon container (--network host)")
+    # 4. Start pylon container with --network host + --env-file for secrets
+    print("[4/6] start pylon container (--network host, --env-file)")
+    # Closes security-audit finding #3: passing secrets via `-e` makes them
+    # visible to anyone who can read `/var/lib/docker/containers/.../config.v2.json`
+    # OR who is in the `docker` group on the host. --env-file injects the
+    # vars into the process environment without persisting them in the
+    # container's HostConfig, so `docker inspect` no longer exposes them.
+    #
+    # PYLON_BOOTSTRAP_CREDITS is not a secret — kept inline.
     run("docker rm -f pylon 2>&1 || true; mkdir -p /var/lib/pylon-data", sudo=True)
     start = (
         "docker run -d --name pylon --restart unless-stopped "
         "--network host "
         "-v /var/lib/pylon-data:/data "
-        f"-e PYLON_API_KEY={keys['PYLON_API_KEY']} "
-        f"-e PYLON_NODE_KEY={keys['PYLON_NODE_KEY']} "
-        f"-e PYLON_ADMIN_KEY={keys['PYLON_ADMIN_KEY']} "
+        "--env-file /etc/pylon-keys "
         "-e PYLON_BOOTSTRAP_CREDITS=10000 "
         "pylon-local:dev"
     )
