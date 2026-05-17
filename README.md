@@ -93,6 +93,7 @@ Recommended:
 | `HEARTBEAT_SECONDS` | Interval between heartbeats | `10` |
 | `NODE_ENGINE_API_KEY` | Bearer token for engine (if it needs one) | (none) |
 | `NODE_VRAM_SYSFS_CARD` | Path like `/sys/class/drm/card0/device` to read live VRAM | (none) |
+| `NODE_ADVERTISED_BASE_URL` | URL pylon should proxy to, when different from the probe URL. Use when pylon and the engine are in different network namespaces (e.g. pylon in a docker container without `--network host`). | (uses `NODE_BASE_URL`) |
 
 ## Wire-up examples
 

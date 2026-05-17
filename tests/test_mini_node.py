@@ -120,6 +120,7 @@ def _cfg(**overrides):
         tiers=("fast",),
         upstream_models=("test-model",),
         base_url="http://127.0.0.1:9998",
+        advertised_base_url=None,
         engine_api_key=None,
         max_concurrency=4,
         node_type=None,
@@ -265,26 +266,60 @@ class RegisterWithRetryTest(unittest.TestCase):
         self.assertEqual(cm.exception.code, 130)
 
     def test_backoff_cap_is_60s(self):
-        # Patch sleep to record durations instead of running them.
+        """Verify the BETWEEN-ATTEMPT cumulative wait caps at 60s, not just
+        that individual sleep chunks are <= 0.5s. The prior version only
+        checked the chunked-sleep impl detail and passed even if the cap was
+        broken at delay=120 or 1000."""
         recorded = []
         mn.time.sleep = lambda s: recorded.append(s)
 
-        stop_count = {"n": 0}
-        def stop_fn():
-            stop_count["n"] += 1
-            return stop_count["n"] > 30  # let many retries happen
+        # Track each register() call so we can measure the gap between them
+        register_call_indices = []
+        original_register = mn.register
 
-        self.fake.register_status = 500
+        def tracking_register(cfg, log):
+            register_call_indices.append(len(recorded))
+            return original_register(cfg, log)
+
+        mn.register = tracking_register
         try:
-            mn.register_with_retry(self.cfg, self.log, stop_fn=stop_fn)
-        except SystemExit:
-            pass
-        # The helper sleeps in 0.5s chunks while accumulating to `delay`,
-        # and delay is doubled per failure capped at 60. So the largest
-        # individual sleep call should never exceed 0.5, and the running
-        # cumulative wait between attempts should be <= 60s.
+            stop_count = {"n": 0}
+            def stop_fn():
+                stop_count["n"] += 1
+                # Each chunked-sleep iteration calls stop_fn. With delays
+                # 2,4,8,16,32,60,60,60... the chunk counts are 4,8,16,32,
+                # 64,120,120,120 = needs >700 calls to see 8 attempts.
+                # Set the budget high enough to clearly observe the cap.
+                return stop_count["n"] > 800
+
+            self.fake.register_status = 500
+            try:
+                mn.register_with_retry(self.cfg, self.log, stop_fn=stop_fn)
+            except SystemExit:
+                pass
+        finally:
+            mn.register = original_register
+
+        # Sanity: chunked-sleep invariant (no single chunk over 0.5s)
         self.assertTrue(all(s <= 0.5 + 1e-9 for s in recorded),
                         f"a sleep exceeded 0.5s: {[s for s in recorded if s > 0.5]}")
+
+        # Real cap check: gaps between register() calls should grow 2,4,8,16,
+        # 32,60,60,...  Sum the recorded sleeps between attempt[i] and
+        # attempt[i+1] and assert each gap <= 60.5s (with rounding tolerance).
+        gaps = []
+        for i in range(len(register_call_indices) - 1):
+            start = register_call_indices[i]
+            end = register_call_indices[i + 1]
+            gaps.append(sum(recorded[start:end]))
+        self.assertTrue(len(gaps) >= 6, f"too few attempts to verify cap: {gaps}")
+        self.assertTrue(all(g <= 60.5 for g in gaps),
+                        f"backoff exceeded 60s cap: {gaps}")
+        # The doubling pattern must actually plateau (not just be small by
+        # luck). At least one observed gap should be >= 32s (the value just
+        # before the cap kicks in).
+        self.assertTrue(any(g >= 32.0 - 1e-6 for g in gaps),
+                        f"backoff never reached >=32s; doubling broken? {gaps}")
 
 
 class HeartbeatTest(unittest.TestCase):
@@ -401,11 +436,103 @@ class EngineProbeTest(unittest.TestCase):
             self.assertAlmostEqual(v, 5.0, places=2)
 
 
+class AdvertisedBaseURLTest(unittest.TestCase):
+    """v0.4: NODE_ADVERTISED_BASE_URL splits the URL the mini-node probes
+    (base_url) from the URL it registers with pylon (advertised_base_url).
+    Needed for cross-namespace deployments where pylon and engine see the
+    engine at different addresses (e.g. pylon in a docker container without
+    --network host, engine on host loopback)."""
+
+    def setUp(self):
+        self.fake = FakePylon()
+        self.log = mn.logging.getLogger("test")
+
+    def tearDown(self):
+        self.fake.stop()
+
+    def test_advertised_url_overrides_in_register_body(self):
+        cfg = _cfg(pylon_url=self.fake.base_url,
+                   base_url=self.fake.base_url,
+                   advertised_base_url="http://172.17.0.1:8080")
+        mn.register(cfg, self.log)
+        _, body, _ = self.fake.calls[0]
+        self.assertEqual(body["base_url"], "http://172.17.0.1:8080")
+        # engines list inside body also uses advertised URL
+        for e in body.get("engines", []):
+            self.assertEqual(e["base_url"], "http://172.17.0.1:8080")
+
+    def test_no_override_uses_base_url(self):
+        cfg = _cfg(pylon_url=self.fake.base_url,
+                   base_url=self.fake.base_url,
+                   advertised_base_url=None)
+        mn.register(cfg, self.log)
+        _, body, _ = self.fake.calls[0]
+        self.assertEqual(body["base_url"], self.fake.base_url)
+
+    def test_from_env_parses_advertised(self):
+        try:
+            os.environ.update({
+                "PYLON_URL": "http://x", "PYLON_NODE_KEY": "k",
+                "NODE_NAME": "n", "NODE_BASE_URL": "http://probe:8080",
+                "NODE_ADVERTISED_BASE_URL": "http://advertise:8080/",
+            })
+            c = mn.Config.from_env()
+            # trailing slash stripped
+            self.assertEqual(c.advertised_base_url, "http://advertise:8080")
+            self.assertEqual(c.base_url, "http://probe:8080")
+        finally:
+            for k in ("PYLON_URL", "PYLON_NODE_KEY", "NODE_NAME",
+                      "NODE_BASE_URL", "NODE_ADVERTISED_BASE_URL"):
+                os.environ.pop(k, None)
+
+
+class URLErrorTest(unittest.TestCase):
+    """v0.4: http_json must catch URLError (connection refused / DNS fail)
+    and return a synthetic HTTPResult(0) so callers don't crash. Prior to
+    this, probe_engine_alive() in main()'s startup wait loop would crash the
+    whole process if the engine wasn't listening yet — defeating the
+    Restart=always recovery story."""
+
+    def test_unreachable_host_returns_status_zero(self):
+        # 127.0.0.1:1 is reserved tcpmux; nothing listens there.
+        res = mn.http_json("GET", "http://127.0.0.1:1/v1/models", timeout=1.0)
+        self.assertEqual(res.status, 0)
+        # body carries an error marker for debugging
+        self.assertIsInstance(res.body, dict)
+        self.assertIn("_url_error", res.body)
+
+    def test_probe_engine_alive_returns_false_on_unreachable(self):
+        """The critical path: startup wait loop must NOT crash."""
+        cfg = _cfg(base_url="http://127.0.0.1:1")
+        self.assertFalse(mn.probe_engine_alive(cfg))
+
+    def test_register_with_retry_handles_unreachable_pylon(self):
+        """register_with_retry must back off cleanly (no crash) when pylon
+        itself is unreachable, not just when pylon returns non-200."""
+        cfg = _cfg(pylon_url="http://127.0.0.1:1",
+                   base_url="http://127.0.0.1:1")
+        log = mn.logging.getLogger("test")
+        # Disable real sleeping so the test runs fast
+        original_sleep = mn.time.sleep
+        mn.time.sleep = lambda _s: None
+        try:
+            stop_count = {"n": 0}
+            def stop_fn():
+                stop_count["n"] += 1
+                return stop_count["n"] > 6  # let 2 retries happen
+            with self.assertRaises(SystemExit) as cm:
+                mn.register_with_retry(cfg, log, stop_fn=stop_fn)
+            self.assertEqual(cm.exception.code, 130)  # stopped, not crashed
+        finally:
+            mn.time.sleep = original_sleep
+
+
 def _run_all():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     for cls in (ConfigTest, RegisterTest, RegisterWithRetryTest,
-                HeartbeatTest, DeregisterTest, EngineProbeTest):
+                HeartbeatTest, DeregisterTest, EngineProbeTest,
+                AdvertisedBaseURLTest, URLErrorTest):
         suite.addTests(loader.loadTestsFromTestCase(cls))
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

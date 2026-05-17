@@ -65,6 +65,15 @@ class Config:
     tiers: tuple[str, ...]
     upstream_models: tuple[str, ...]
     base_url: str            # the engine's OpenAI-compat root (without trailing /v1)
+    # Optional: URL pylon should proxy to, when different from the URL the
+    # mini-node uses to probe the engine. Defaults to base_url. Use this when
+    # pylon and the engine are in different network namespaces — e.g. pylon
+    # runs in a docker container without --network host, and the engine sits
+    # on the docker bridge gateway (172.17.0.1) from pylon's perspective but
+    # on 127.0.0.1 from the mini-node's perspective. Without this knob,
+    # cross-namespace deployments break with "upstream error: All connection
+    # attempts failed".
+    advertised_base_url: str | None
     engine_api_key: str | None  # API key for the engine, NOT for pylon
     max_concurrency: int
     node_type: str | None
@@ -101,6 +110,7 @@ class Config:
             tiers=_tup("NODE_TIERS", "fast"),
             upstream_models=_tup("NODE_UPSTREAM_MODELS"),
             base_url=_req("NODE_BASE_URL").rstrip("/"),
+            advertised_base_url=(_opt("NODE_ADVERTISED_BASE_URL").rstrip("/") or None),
             engine_api_key=_opt("NODE_ENGINE_API_KEY") or None,
             max_concurrency=int(_opt("NODE_MAX_CONCURRENCY", "1")),
             node_type=_opt("NODE_TYPE") or None,
@@ -143,6 +153,20 @@ def http_json(method: str, url: str, body: dict | None = None,
         except Exception:
             payload = None
         return HTTPResult(e.code, payload)
+    except urllib.error.URLError as e:
+        # Connection refused, DNS failure, socket timeout, etc. — engine or
+        # pylon isn't reachable. Return synthetic 0/None so callers can treat
+        # "unreachable" the same way as "reachable but failed": probe_alive
+        # returns False, heartbeat returns non-200, register_with_retry backs
+        # off. Without this catch the exception propagates out of the bare
+        # probe_engine_alive call in main()'s startup wait loop and crashes
+        # the process before signal handlers are even installed.
+        return HTTPResult(0, {"_url_error": str(getattr(e, "reason", e))})
+    except (OSError, json.JSONDecodeError) as e:
+        # OSError covers low-level socket errors that escape URLError on
+        # some platforms; JSONDecodeError covers servers returning text/html
+        # for an error page. Treat both as 0 just like URLError.
+        return HTTPResult(0, {"_decode_error": str(e)})
 
 
 # =============================================================================
@@ -238,12 +262,19 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
     Raises RegisterError on non-200 from pylon so callers (notably
     register_with_retry) can decide whether to retry or give up.
     """
+    # The URL we ADVERTISE to pylon (where pylon proxies user requests).
+    # Defaults to base_url (probe URL) when not set — preserves existing
+    # behavior for single-namespace deployments. Override via
+    # NODE_ADVERTISED_BASE_URL for cross-namespace setups (e.g. pylon in a
+    # docker bridge container, engine on host loopback).
+    pylon_facing_url = cfg.advertised_base_url or cfg.base_url
+
     body: dict[str, Any] = {
         "name": cfg.name,
         "pool": cfg.pool,
         "tiers": list(cfg.tiers),
         "upstream_models": list(cfg.upstream_models),
-        "base_url": cfg.base_url,
+        "base_url": pylon_facing_url,
         "max_concurrency": cfg.max_concurrency,
     }
     if cfg.engine_api_key:
@@ -264,7 +295,7 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
     if cfg.upstream_models:
         body["engines"] = [
             {"model": m, "max_concurrency": cfg.max_concurrency,
-             "base_url": cfg.base_url}
+             "base_url": pylon_facing_url}
             for m in cfg.upstream_models
         ]
 
