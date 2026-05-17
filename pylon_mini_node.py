@@ -82,6 +82,11 @@ class Config:
     engine_kind: str         # "llama_cpp" | "vllm" | "sglang" | "external"
     heartbeat_seconds: float
     vram_sysfs_card: str | None  # path like /sys/class/drm/card0/device when set
+    # Seconds the engine has to respond to a /v1/models probe before
+    # mini-node decides it's down. Cold-loading vllm / paged-out
+    # llama-server may need >3s; raising this prevents `state=stopped`
+    # flapping that deselects the node from pylon's pick list.
+    engine_probe_timeout_seconds: float = 3.0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -119,6 +124,8 @@ class Config:
             engine_kind=_opt("NODE_ENGINE_KIND", "llama_cpp"),
             heartbeat_seconds=float(_opt("HEARTBEAT_SECONDS", "10")),
             vram_sysfs_card=_opt("NODE_VRAM_SYSFS_CARD") or None,
+            engine_probe_timeout_seconds=float(
+                _opt("ENGINE_PROBE_TIMEOUT_SECONDS", "3.0")),
         )
 
 
@@ -175,9 +182,13 @@ def http_json(method: str, url: str, body: dict | None = None,
 # =============================================================================
 
 def probe_engine_alive(cfg: Config) -> bool:
-    """Returns True if the engine's /v1/models endpoint answers within 3s."""
+    """Returns True if the engine's /v1/models endpoint answers within the
+    configured probe timeout (ENGINE_PROBE_TIMEOUT_SECONDS, default 3.0s).
+    A cold-loading vllm or paged-out llama-server may need >3s — bump the
+    env knob if heartbeats are flapping `state=stopped` and pylon's pick
+    list deselects the node mid-load."""
     res = http_json("GET", f"{cfg.base_url}/v1/models", token=cfg.engine_api_key,
-                    timeout=3.0)
+                    timeout=cfg.engine_probe_timeout_seconds)
     return 200 <= res.status < 300
 
 
@@ -255,19 +266,34 @@ def _probe_prom_gauge(cfg: Config, metric_name: str) -> int:
     except Exception:
         return 0
 
+    import math
     total = 0.0
     for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Lines look like: `metric_name{labels...} VALUE` or `metric_name VALUE`
-        if line.startswith(metric_name):
-            # Find the VALUE — last whitespace-separated token
-            try:
-                value_str = line.rsplit(None, 1)[-1]
-                total += float(value_str)
-            except (ValueError, IndexError):
-                continue
+        # Lines look like: `metric_name{labels...} VALUE` or `metric_name VALUE`.
+        # Exact match required on the name — `startswith(metric_name)` alone
+        # would also match `<metric_name>_total` (a different metric family)
+        # and double-count. The next char after the name must be `{` (labels
+        # follow) or whitespace (no labels, value follows).
+        if not line.startswith(metric_name):
+            continue
+        rest = line[len(metric_name):]
+        if rest and rest[0] not in "{ \t":
+            continue
+        # Find the VALUE — last whitespace-separated token.
+        try:
+            value_str = line.rsplit(None, 1)[-1]
+            v = float(value_str)
+        except (ValueError, IndexError):
+            continue
+        # Skip Inf/NaN — Prometheus exposition allows these for some metric
+        # families but they'd crash the int() conversion below and aren't
+        # meaningful as a request-count.
+        if not math.isfinite(v):
+            continue
+        total += v
     return int(total)
 
 

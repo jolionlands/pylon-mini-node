@@ -139,6 +139,7 @@ def _cfg(**overrides):
         engine_kind="llama_cpp",
         heartbeat_seconds=0.05,
         vram_sysfs_card=None,
+        engine_probe_timeout_seconds=3.0,
     )
     base.update(overrides)
     return mn.Config(**base)
@@ -478,6 +479,32 @@ class EngineProbeTest(unittest.TestCase):
         """external engines don't have an in_flight probe — return 0."""
         cfg = _cfg(base_url=self.fake.base_url, engine_kind="external")
         assert mn.probe_in_flight(cfg) == 0
+
+    def test_probe_in_flight_vllm_rejects_prefix_collision(self):
+        """v0.6: don't double-count siblings like `<name>_total`. Exact
+        match required on the metric name — the next char must be `{`
+        (labels) or whitespace (no labels)."""
+        self.fake.metrics_text = (
+            "# TYPE vllm:num_requests_running gauge\n"
+            'vllm:num_requests_running{model="a"} 3\n'
+            "# TYPE vllm:num_requests_running_total counter\n"
+            "vllm:num_requests_running_total 1000\n"  # Should NOT be counted
+        )
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="vllm")
+        assert mn.probe_in_flight(cfg) == 3
+
+    def test_probe_in_flight_skips_inf_and_nan(self):
+        """v0.6: malformed metric lines yielding Inf/NaN must not crash
+        the int() conversion. Skip them silently."""
+        self.fake.metrics_text = (
+            "# TYPE vllm:num_requests_running gauge\n"
+            'vllm:num_requests_running{model="a"} 2\n'
+            'vllm:num_requests_running{model="b"} +Inf\n'
+            'vllm:num_requests_running{model="c"} NaN\n'
+            'vllm:num_requests_running{model="d"} 5\n'
+        )
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="vllm")
+        assert mn.probe_in_flight(cfg) == 7
 
     def test_probe_in_flight_vllm_unreachable_returns_zero(self):
         """vllm probe against an unreachable host returns 0, doesn't crash."""
