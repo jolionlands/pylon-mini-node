@@ -186,27 +186,89 @@ def probe_in_flight(cfg: Config) -> int:
 
     llama.cpp llama-server: GET /slots returns a list of slot dicts; busy
         slots have is_processing=true (or task_id != -1 on older builds).
-    vllm: /metrics has `vllm:num_requests_running` but parsing prometheus
-        text is messy; fall back to slot=0 by default.
-    On any failure, return 0 — under-reporting is safer than over-reporting
-    (over-reporting would gate the node off the router's pick list).
+    vllm: GET /metrics returns Prometheus text; extract
+        `vllm:num_requests_running` gauge. vllm v0.7+ also exposes the same
+        under `vllm:gpu_cache_usage_perc` but `num_requests_running` is
+        the documented public metric.
+    sglang: GET /metrics, look for `sglang:num_running_reqs` (gauge,
+        added in sglang v0.4). Older builds (no metrics) fall through to 0.
+    external: no probe — return 0 (the operator's whatever it is keeps
+        its own admission control).
+
+    On any failure / unsupported engine kind: return 0. Under-reporting
+    is safer than over-reporting — over-reporting would gate the node
+    off pylon's pick list entirely.
     """
-    if cfg.engine_kind == "llama_cpp":
-        try:
-            res = http_json("GET", f"{cfg.base_url}/slots",
-                            token=cfg.engine_api_key, timeout=2.0)
-            if res.status == 200 and isinstance(res.body, list):
-                busy = 0
-                for slot in res.body:
-                    if isinstance(slot, dict) and (
-                        slot.get("is_processing") is True
-                        or (slot.get("task_id", -1) != -1)
-                    ):
-                        busy += 1
-                return busy
-        except Exception:
-            pass
+    kind = cfg.engine_kind
+    if kind == "llama_cpp":
+        return _probe_llama_cpp_slots(cfg)
+    if kind == "vllm":
+        return _probe_prom_gauge(cfg, "vllm:num_requests_running")
+    if kind == "sglang":
+        return _probe_prom_gauge(cfg, "sglang:num_running_reqs")
     return 0
+
+
+def _probe_llama_cpp_slots(cfg: Config) -> int:
+    try:
+        res = http_json("GET", f"{cfg.base_url}/slots",
+                        token=cfg.engine_api_key, timeout=2.0)
+        if res.status == 200 and isinstance(res.body, list):
+            busy = 0
+            for slot in res.body:
+                if isinstance(slot, dict) and (
+                    slot.get("is_processing") is True
+                    or (slot.get("task_id", -1) != -1)
+                ):
+                    busy += 1
+            return busy
+    except Exception:
+        pass
+    return 0
+
+
+def _probe_prom_gauge(cfg: Config, metric_name: str) -> int:
+    """Pull /metrics (Prometheus text format) and return the sum of the
+    given gauge across all label sets. Stdlib only — no prometheus_client
+    dep on the mini-node side.
+
+    Prometheus text format example:
+
+        # HELP vllm:num_requests_running ...
+        # TYPE vllm:num_requests_running gauge
+        vllm:num_requests_running{model_name="x"} 3.0
+        vllm:num_requests_running{model_name="y"} 1.0
+
+    We sum across label sets (one engine often serves multiple models).
+    """
+    try:
+        url = f"{cfg.base_url}/metrics"
+        # http_json parses JSON; for prom text we want raw bytes. Use
+        # urllib directly here.
+        req = urllib.request.Request(url=url, method="GET")
+        if cfg.engine_api_key:
+            req.add_header("Authorization", f"Bearer {cfg.engine_api_key}")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status != 200:
+                return 0
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return 0
+
+    total = 0.0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Lines look like: `metric_name{labels...} VALUE` or `metric_name VALUE`
+        if line.startswith(metric_name):
+            # Find the VALUE — last whitespace-separated token
+            try:
+                value_str = line.rsplit(None, 1)[-1]
+                total += float(value_str)
+            except (ValueError, IndexError):
+                continue
+    return int(total)
 
 
 def probe_vram_used_gb(cfg: Config) -> float | None:

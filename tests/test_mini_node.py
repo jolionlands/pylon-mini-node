@@ -81,6 +81,15 @@ class _FakePylonHandler(BaseHTTPRequestHandler):
             return self._reply(503, {"error": "down"})
         if self.path == "/slots":
             return self._reply(200, srv.slots_body)
+        if self.path == "/metrics":
+            # Prometheus text format response — bypass the JSON _reply
+            body = srv.metrics_text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "text/plain; version=0.0.4")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         return self._reply(404, {"error": "unknown"})
 
 
@@ -92,6 +101,7 @@ class FakePylon:
         self.heartbeat_status = 200
         self.engine_alive = True
         self.slots_body: list[dict] = []
+        self.metrics_text: str = ""
         self._srv = HTTPServer(("127.0.0.1", 0), _FakePylonHandler)
         self._srv.fake = self  # type: ignore[attr-defined]
         self._th = threading.Thread(target=self._srv.serve_forever, daemon=True)
@@ -423,6 +433,56 @@ class EngineProbeTest(unittest.TestCase):
         # Wrong base_url — should NOT throw, just return 0.
         cfg = _cfg(base_url="http://127.0.0.1:1")
         self.assertEqual(mn.probe_in_flight(cfg), 0)
+
+    def test_probe_in_flight_vllm_sums_prom_gauge(self):
+        """v0.5: vllm engine kind probes /metrics for vllm:num_requests_running."""
+        self.fake.metrics_text = (
+            "# HELP vllm:num_requests_running The number of requests currently running on the GPU.\n"
+            "# TYPE vllm:num_requests_running gauge\n"
+            'vllm:num_requests_running{model_name="m"} 3.0\n'
+            "# HELP some_other_metric junk\n"
+            "# TYPE some_other_metric gauge\n"
+            "some_other_metric 999\n"
+        )
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="vllm")
+        assert mn.probe_in_flight(cfg) == 3
+
+    def test_probe_in_flight_vllm_sums_across_labels(self):
+        """Multi-model vllm endpoint: sum across label sets."""
+        self.fake.metrics_text = (
+            "# TYPE vllm:num_requests_running gauge\n"
+            'vllm:num_requests_running{model_name="a"} 2.0\n'
+            'vllm:num_requests_running{model_name="b"} 5.0\n'
+        )
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="vllm")
+        assert mn.probe_in_flight(cfg) == 7
+
+    def test_probe_in_flight_vllm_zero_when_metric_absent(self):
+        """vllm endpoint that doesn't export the gauge: return 0 cleanly."""
+        self.fake.metrics_text = (
+            "# TYPE some_other_metric gauge\n"
+            "some_other_metric 42\n"
+        )
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="vllm")
+        assert mn.probe_in_flight(cfg) == 0
+
+    def test_probe_in_flight_sglang_sums_prom_gauge(self):
+        self.fake.metrics_text = (
+            "# TYPE sglang:num_running_reqs gauge\n"
+            'sglang:num_running_reqs{model="m"} 4\n'
+        )
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="sglang")
+        assert mn.probe_in_flight(cfg) == 4
+
+    def test_probe_in_flight_external_returns_zero(self):
+        """external engines don't have an in_flight probe — return 0."""
+        cfg = _cfg(base_url=self.fake.base_url, engine_kind="external")
+        assert mn.probe_in_flight(cfg) == 0
+
+    def test_probe_in_flight_vllm_unreachable_returns_zero(self):
+        """vllm probe against an unreachable host returns 0, doesn't crash."""
+        cfg = _cfg(base_url="http://127.0.0.1:1", engine_kind="vllm")
+        assert mn.probe_in_flight(cfg) == 0
 
     def test_probe_vram_used_gb_reads_sysfs(self, tmp_dir=None):
         import tempfile
