@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/prewarm-completed.response.schema.json",
+  "title": "POST /v1/nodes/{node_id}/prewarm/completed response",
+  "description": "tenant_id is the tenant pylon attributed the prewarm to, or null when unresolved.",
+  "type": "object",
+  "required": [
+    "ok"
+  ],
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "tenant_id": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "ok": true,
+      "tenant_id": 7
+    },
+    {
+      "ok": true,
+      "tenant_id": null
+    }
+  ]
+}

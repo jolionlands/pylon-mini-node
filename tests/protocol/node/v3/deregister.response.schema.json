@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/deregister.response.schema.json",
+  "title": "POST /v1/nodes/{node_id}/deregister response",
+  "description": "The request has no body; the node token authenticates it. Pylon marks the node offline.",
+  "type": "object",
+  "required": [
+    "deregistered",
+    "id"
+  ],
+  "properties": {
+    "deregistered": {
+      "type": "boolean"
+    },
+    "id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "deregistered": true,
+      "id": "n_1"
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/job-fail.request.schema.json",
+  "title": "POST /v1/nodes/{node_id}/jobs/{job_id}/fail request",
+  "description": "requeue=true hands the job back to the queue until max_attempts. An optional result carries partial output (an engine response body with usage) produced before the failure; on a permanent failure pylon stores it on the job and, for jobs that hold a billing reservation, bills that usage instead of releasing the reservation.",
+  "type": "object",
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "error": {
+      "type": "string"
+    },
+    "requeue": {
+      "type": "boolean"
+    },
+    "result": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "error": "upstream 500",
+      "requeue": true
+    },
+    {
+      "error": "engine crashed mid-generation",
+      "requeue": false,
+      "result": {
+        "id": "chatcmpl-1",
+        "choices": [],
+        "usage": {
+          "prompt_tokens": 120,
+          "completion_tokens": 40
+        }
+      }
+    }
+  ]
+}

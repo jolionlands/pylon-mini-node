@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/common.schema.json",
+  "title": "Node protocol v3 shared definitions",
+  "description": "Shared $defs referenced by the other v3 node-protocol schemas.",
+  "$defs": {
+    "protocolVersion": {
+      "description": "Node protocol major version the sender speaks. v3 senders send \"3\". Pylon treats a missing value as \"2\" (legacy) and logs, but does not reject, unknown values.",
+      "type": "string",
+      "pattern": "^[0-9]+$"
+    },
+    "channelMode": {
+      "description": "v3.1 outbound channel mode. preferred: pylon uses the channel while it is connected and base_url otherwise. required: the node is only reachable over its channel; pylon never dials base_url and treats the node as busy while the channel is down.",
+      "type": "string",
+      "enum": [
+        "preferred",
+        "required"
+      ]
+    },
+    "channelAdvert": {
+      "description": "v3.1: the node will open an outbound channel to WS /v1/nodes/{id}/channel. Ignored by pylon when PYLON_NODE_CHANNEL_ENABLED is off and by pre-3.1 pylon.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/channelMode"
+        },
+        "channel_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        }
+      },
+      "additionalProperties": true
+    },
+    "engine": {
+      "description": "Per-engine metadata advertised at register time. Unknown fields are ignored by pylon.",
+      "type": "object",
+      "required": [
+        "model"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tensor_parallel_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pipeline_parallel_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "data_parallel_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "quantization": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dtype": {
+          "type": "string"
+        },
+        "max_model_len": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_concurrency": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "prefix_caching": {
+          "type": "boolean"
+        },
+        "speculative_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "runtime": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ctx_size": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ngl": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "n_parallel": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ubatch_size": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "slot_save_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "slots": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object"
+          }
+        },
+        "upstream_models": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "heartbeatEngine": {
+      "description": "Per-engine live snapshot carried on heartbeats. Deliberately loose: pylon coerces each field and drops malformed entries instead of rejecting the heartbeat.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "slots": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "object"
+          }
+        },
+        "upstream_models": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "backend_roles": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "backend_pools": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "slotTiming": {
+      "type": "object",
+      "properties": {
+        "engine": {
+          "type": "string"
+        },
+        "slot_id": {
+          "type": [
+            "integer",
+            "string"
+          ]
+        },
+        "hit_ratio_1m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "save_ms_p50": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "restore_ms_p50": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "save_ms_p95": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "restore_ms_p95": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "node": {
+      "description": "Pylon's view of a node, as returned by register/heartbeat and /v1/admin/nodes. Only the identity fields are contractual; the rest is informational and may grow.",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "pool",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "tiers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "upstream_models": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "base_url": {
+          "type": "string"
+        },
+        "protocol_version": {
+          "$ref": "#/$defs/protocolVersion"
+        }
+      },
+      "additionalProperties": true
+    },
+    "job": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "payload"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "payload": {
+          "description": "Request body the node replays against its engine (OpenAI chat shape for kind=chat).",
+          "type": "object"
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "max_attempts": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

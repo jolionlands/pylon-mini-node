@@ -26,12 +26,23 @@ Configuration: environment variables (see CONFIG block below). Example:
 
 Send SIGTERM (or Ctrl-C) for clean deregister.
 
+Speaks pylon node protocol v3 (protocol/node/v3 in the pylon repo):
+register and every heartbeat carry protocol_version "3"; register carries a
+stable instance_id (NODE_INSTANCE_ID, default "<hostname>:<engine port>");
+heartbeats carry the same host telemetry as forge (process uptime, disk,
+network and memory counters). tests/protocol/node/v3 is a vendored copy of
+the schemas the tests validate these bodies against.
+
 Lifecycle:
   1. Probe local engine (NODE_BASE_URL/v1/models) so we don't register dead.
   2. POST /v1/nodes/register; save returned node_id + node_token.
   3. Heartbeat loop (default 10s): poll engine /slots if available, count
      busy slots → in_flight; probe /sys/class/drm/.../mem_info_vram_used
-     if NODE_VRAM_SYSFS=1; POST /v1/nodes/{id}/heartbeat.
+     if NODE_VRAM_SYSFS_CARD is set; POST /v1/nodes/{id}/heartbeat.
+     state is "ready" while the engine health probe answers and "busy"
+     (with last_error) when it does not, so pylon stops routing to an
+     engine that cannot serve without the deregister semantics of
+     "offline" (same rule as forge 0.27).
   4. On SIGTERM/SIGINT, POST /v1/nodes/{id}/deregister and exit.
 
 If heartbeat returns 404 (pylon forgot us — e.g. router restart), we
@@ -43,13 +54,34 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import signal
+import socket
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+# Node protocol major version (pylon protocol/node/v3).
+PROTOCOL_VERSION = "3"
+_PROCESS_STARTED_AT = time.monotonic()
+
+
+def default_instance_id(base_url: str) -> str:
+    """``<hostname>:<engine port>``: stable across restarts, unique per engine
+    on a host (one mini-node process fronts one engine)."""
+    parsed = urllib.parse.urlsplit(base_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return f"{socket.gethostname()}:{port}"[:128]
 
 
 # =============================================================================
@@ -87,6 +119,10 @@ class Config:
     # llama-server may need >3s; raising this prevents `state=stopped`
     # flapping that deselects the node from pylon's pick list.
     engine_probe_timeout_seconds: float = 3.0
+    # Stable identity across restarts (protocol v3 register.instance_id).
+    instance_id: str | None = None
+    # Filesystem whose usage is reported as disk_total/free_bytes.
+    disk_path: str = "."
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -126,6 +162,9 @@ class Config:
             vram_sysfs_card=_opt("NODE_VRAM_SYSFS_CARD") or None,
             engine_probe_timeout_seconds=float(
                 _opt("ENGINE_PROBE_TIMEOUT_SECONDS", "3.0")),
+            instance_id=(_opt("NODE_INSTANCE_ID")[:128]
+                         or default_instance_id(_req("NODE_BASE_URL"))),
+            disk_path=_opt("NODE_DISK_PATH", "."),
         )
 
 
@@ -185,11 +224,24 @@ def probe_engine_alive(cfg: Config) -> bool:
     """Returns True if the engine's /v1/models endpoint answers within the
     configured probe timeout (ENGINE_PROBE_TIMEOUT_SECONDS, default 3.0s).
     A cold-loading vllm or paged-out llama-server may need >3s — bump the
-    env knob if heartbeats are flapping `state=stopped` and pylon's pick
+    env knob if heartbeats are flapping `state=busy` and pylon's pick
     list deselects the node mid-load."""
+    return probe_engine_health(cfg) is None
+
+
+def probe_engine_health(cfg: Config) -> str | None:
+    """None when the engine's /v1/models answers 2xx, else a short reason
+    (reported to pylon as the heartbeat's ``last_error``)."""
     res = http_json("GET", f"{cfg.base_url}/v1/models", token=cfg.engine_api_key,
                     timeout=cfg.engine_probe_timeout_seconds)
-    return 200 <= res.status < 300
+    if 200 <= res.status < 300:
+        return None
+    if res.status == 0:
+        detail = ""
+        if isinstance(res.body, dict):
+            detail = str(res.body.get("_url_error") or res.body.get("_decode_error") or "")
+        return f"engine unreachable at {cfg.base_url}/v1/models: {detail}"[:240]
+    return f"engine /v1/models returned HTTP {res.status}"
 
 
 def probe_in_flight(cfg: Config) -> int:
@@ -311,6 +363,70 @@ def probe_vram_used_gb(cfg: Config) -> float | None:
 
 
 # =============================================================================
+# Host telemetry — the same fields and sources as forge's heartbeat
+# (forge runner._host_telemetry). Cheap local reads only; a field that cannot
+# be read on this platform is omitted, never guessed.
+# =============================================================================
+
+def _read_network_bytes(path: str = "/proc/net/dev") -> tuple[int, int] | None:
+    """Aggregate rx/tx bytes over non-loopback interfaces."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()[2:]
+    except OSError:
+        return None
+    rx = tx = 0
+    for line in lines:
+        if ":" not in line:
+            continue
+        iface, raw = line.split(":", 1)
+        if iface.strip() == "lo":
+            continue
+        fields = raw.split()
+        try:
+            rx += int(fields[0])
+            tx += int(fields[8])
+        except (IndexError, ValueError):
+            continue
+    return rx, tx
+
+
+def _read_memory_bytes(path: str = "/proc/meminfo") -> tuple[int, int] | None:
+    """(MemTotal, MemAvailable) in bytes on Linux."""
+    try:
+        values: dict[str, int] = {}
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                key, _, raw = line.partition(":")
+                if key in ("MemTotal", "MemAvailable"):
+                    values[key] = int(raw.split()[0]) * 1024
+        return values["MemTotal"], values["MemAvailable"]
+    except (IndexError, OSError, KeyError, ValueError):
+        return None
+
+
+def host_telemetry(cfg: Config) -> dict[str, int]:
+    telemetry: dict[str, int] = {
+        "process_uptime_seconds": max(0, int(time.monotonic() - _PROCESS_STARTED_AT)),
+    }
+    try:
+        disk_path = Path(cfg.disk_path).resolve()
+        while not disk_path.exists() and disk_path != disk_path.parent:
+            disk_path = disk_path.parent
+        usage = shutil.disk_usage(disk_path)
+        telemetry.update(disk_total_bytes=int(usage.total), disk_free_bytes=int(usage.free))
+    except OSError:
+        pass
+    network = _read_network_bytes()
+    if network is not None:
+        telemetry.update(network_rx_bytes=network[0], network_tx_bytes=network[1])
+    memory = _read_memory_bytes()
+    if memory is not None:
+        telemetry.update(memory_total_bytes=memory[0], memory_available_bytes=memory[1])
+    return telemetry
+
+
+# =============================================================================
 # Pylon lifecycle
 # =============================================================================
 
@@ -358,6 +474,7 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
     pylon_facing_url = cfg.advertised_base_url or cfg.base_url
 
     body: dict[str, Any] = {
+        "protocol_version": PROTOCOL_VERSION,
         "name": cfg.name,
         "pool": cfg.pool,
         "tiers": list(cfg.tiers),
@@ -365,6 +482,8 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
         "base_url": pylon_facing_url,
         "max_concurrency": cfg.max_concurrency,
     }
+    if cfg.instance_id:
+        body["instance_id"] = cfg.instance_id
     if cfg.engine_api_key:
         body["api_key"] = cfg.engine_api_key
     if cfg.node_type:
@@ -374,7 +493,9 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
         body["gpu"] = cfg.gpu
         body["gpu_count"] = 1
     if cfg.vram_gb is not None:
-        body["vram_gb"] = cfg.vram_gb
+        # v3 register.vram_gb is an integer (GB); heartbeats carry the
+        # exact value as vram_total_gb.
+        body["vram_gb"] = int(round(cfg.vram_gb))
     if cfg.engine_kind:
         body["engine"] = cfg.engine_kind
 
@@ -395,29 +516,42 @@ def register(cfg: Config, log: logging.Logger) -> tuple[str, str]:
         )
     node_id = res.body["node"]["id"]
     node_token = res.body["node_token"]
-    log.info(f"registered: node_id={node_id} pool={cfg.pool} "
-             f"tiers={list(cfg.tiers)} models={list(cfg.upstream_models)}")
+    log.info(f"registered: node_id={node_id} instance_id={cfg.instance_id} "
+             f"pool={cfg.pool} tiers={list(cfg.tiers)} "
+             f"models={list(cfg.upstream_models)} protocol={PROTOCOL_VERSION}")
     return node_id, node_token
 
 
-def heartbeat(cfg: Config, node_id: str, node_token: str,
-              log: logging.Logger) -> bool:
-    """POST /v1/nodes/{id}/heartbeat. Returns False on 404 (need re-register)."""
-    in_flight = probe_in_flight(cfg)
-    alive = probe_engine_alive(cfg)
-    state = "ready" if alive else "stopped"
-
+def build_heartbeat_body(cfg: Config) -> dict[str, Any]:
+    """The v3 heartbeat body (validated against heartbeat.request in tests)."""
+    health_error = probe_engine_health(cfg)
+    in_flight = probe_in_flight(cfg) if health_error is None else 0
     body: dict[str, Any] = {
+        "protocol_version": PROTOCOL_VERSION,
         "in_flight": in_flight,
-        "state": state,
+        # busy, not offline: pylon keeps the row but stops routing to it, and
+        # the next heartbeat with a healthy engine flips it back to ready.
+        "state": "ready" if health_error is None else "busy",
         "queue_depth": 0,        # mini-node doesn't see queued requests
         "pending_tokens": 0,
     }
+    if health_error is not None:
+        body["last_error"] = health_error
     vram_used = probe_vram_used_gb(cfg)
     if vram_used is not None:
         body["vram_used_gb"] = vram_used
     if cfg.vram_gb is not None:
         body["vram_total_gb"] = cfg.vram_gb
+    body.update(host_telemetry(cfg))
+    return body
+
+
+def heartbeat(cfg: Config, node_id: str, node_token: str,
+              log: logging.Logger) -> bool:
+    """POST /v1/nodes/{id}/heartbeat. Returns False on 404 (need re-register)."""
+    body = build_heartbeat_body(cfg)
+    if body["state"] != "ready":
+        log.warning(f"engine unhealthy; reporting busy: {body.get('last_error')}")
 
     res = http_json(
         "POST",
@@ -465,8 +599,9 @@ def main() -> int:
     log = logging.getLogger("pylon-mini-node")
 
     cfg = Config.from_env()
-    log.info(f"starting: name={cfg.name} pylon={cfg.pylon_url} "
-             f"engine={cfg.base_url} kind={cfg.engine_kind}")
+    log.info(f"starting: name={cfg.name} instance_id={cfg.instance_id} "
+             f"pylon={cfg.pylon_url} engine={cfg.base_url} kind={cfg.engine_kind} "
+             f"protocol={PROTOCOL_VERSION}")
 
     # Wait for the local engine to be alive before registering — never
     # register a node that isn't actually serving.

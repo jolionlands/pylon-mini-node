@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/lease.response.schema.json",
+  "title": "POST /v1/nodes/{node_id}/lease response",
+  "description": "job is null when nothing is queued for this kind.",
+  "type": "object",
+  "required": [
+    "job"
+  ],
+  "properties": {
+    "job": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "common.schema.json#/$defs/job"
+        }
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "job": null
+    },
+    {
+      "job": {
+        "id": 42,
+        "kind": "chat",
+        "status": "leased",
+        "attempts": 1,
+        "max_attempts": 3,
+        "payload": {
+          "model": "qwen3-32b",
+          "messages": [
+            {
+              "role": "user",
+              "content": "hi"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

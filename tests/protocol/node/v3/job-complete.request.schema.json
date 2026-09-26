@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/job-complete.request.schema.json",
+  "title": "POST /v1/nodes/{node_id}/jobs/{job_id}/complete request",
+  "description": "Result of a leased job (the engine's response body).",
+  "type": "object",
+  "required": [
+    "result"
+  ],
+  "properties": {
+    "result": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "result": {
+        "id": "chatcmpl-1",
+        "choices": []
+      }
+    }
+  ]
+}
