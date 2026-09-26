@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/placement.schema.json",
+  "title": "On-demand placement definitions (v3.1)",
+  "description": "Additive in protocol v3.1: models a node CAN serve (its forge manifest `catalog:`), loaded or not. Sent as `servable_models` on register and heartbeat; omitted by nodes without a catalog. Kept in its own file so other v3.x additions do not collide.",
+  "$defs": {
+    "servableModel": {
+      "type": "object",
+      "required": [
+        "name",
+        "loaded"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Model id the node serves once loaded (its upstream model)."
+        },
+        "loaded": {
+          "type": "boolean",
+          "description": "True while an engine for this model is running and ready."
+        },
+        "est_vram_gb": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "VRAM the loaded model needs, in GB."
+        },
+        "est_load_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "description": "Cold-start estimate: spawn, ready and warmup."
+        },
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "forge engine kind (llama_cpp, vllm_shell, ...)."
+        },
+        "context_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "servableModels": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/servableModel"
+      }
+    }
+  },
+  "examples": [
+    {
+      "name": "qwen3-32b",
+      "loaded": false,
+      "est_vram_gb": 21.5,
+      "est_load_seconds": 45,
+      "kind": "llama_cpp",
+      "context_tokens": 32768
+    }
+  ],
+  "$ref": "#/$defs/servableModel"
+}

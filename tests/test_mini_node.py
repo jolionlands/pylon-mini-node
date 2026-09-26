@@ -378,13 +378,28 @@ class HeartbeatTest(unittest.TestCase):
         _, body, _ = self.fake.calls[0]
         self.assertEqual(body["in_flight"], 3)
 
-    def test_heartbeat_state_stopped_when_engine_down(self):
+    def test_heartbeat_state_busy_when_engine_down(self):
+        # v3 heartbeat.state has no "stopped"; like forge 0.27 the node
+        # reports busy (kept, not routed to) with the probe failure.
         self.fake.engine_alive = False
         node_id, token = mn.register(self.cfg, self.log)
         self.fake.calls.clear()
         mn.heartbeat(self.cfg, node_id, token, self.log)
         _, body, _ = self.fake.calls[0]
-        self.assertEqual(body["state"], "stopped")
+        self.assertEqual(body["state"], "busy")
+        self.assertIn("HTTP 503", body["last_error"])
+
+    def test_heartbeat_recovers_to_ready(self):
+        self.fake.engine_alive = False
+        node_id, token = mn.register(self.cfg, self.log)
+        mn.heartbeat(self.cfg, node_id, token, self.log)
+        self.fake.engine_alive = True
+        self.fake.calls.clear()
+        mn.heartbeat(self.cfg, node_id, token, self.log)
+        _, body, _ = self.fake.calls[0]
+        self.assertEqual(body["state"], "ready")
+        self.assertNotIn("last_error", body)
+        self.assertEqual(body["protocol_version"], "3")
 
 
 class DeregisterTest(unittest.TestCase):

@@ -1,0 +1,248 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/register.request.schema.json",
+  "title": "POST /v1/nodes/register request",
+  "description": "Sent by a node (forge, mini-node) with its node key (operator) or enrollment token (community).",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "name",
+    "pool",
+    "tiers",
+    "upstream_models",
+    "base_url"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "instance_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "pool": {
+      "type": "string",
+      "minLength": 1
+    },
+    "tiers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "upstream_models": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "base_url": {
+      "type": "string",
+      "minLength": 1
+    },
+    "metrics_url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "api_key": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 256
+    },
+    "node_type": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "gpu": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "gpu_count": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "vram_gb": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "engine": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_context_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "features": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "engines": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "common.schema.json#/$defs/engine"
+      }
+    },
+    "channel": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/channelAdvert"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "servable_models": {
+      "$ref": "placement.schema.json#/$defs/servableModels"
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "protocol_version": "3",
+      "name": "maverick-forge",
+      "pool": "long",
+      "tiers": [
+        "fast",
+        "long"
+      ],
+      "upstream_models": [
+        "qwen3-32b"
+      ],
+      "base_url": "http://10.0.0.5:8081/v1"
+    },
+    {
+      "protocol_version": "3",
+      "name": "cassandra-forge",
+      "instance_id": "cassandra-01",
+      "pool": "long",
+      "tiers": [
+        "long"
+      ],
+      "upstream_models": [
+        "glm-5.3-flash"
+      ],
+      "base_url": "http://10.0.0.7:8081/v1",
+      "metrics_url": "http://10.0.0.7:8081/metrics",
+      "api_key": "example-inference-key",
+      "max_concurrency": 8,
+      "node_type": "b70x8",
+      "gpu": "arc-b70",
+      "gpu_count": 8,
+      "vram_gb": 256,
+      "engine": "vllm",
+      "max_context_tokens": 312000,
+      "features": [
+        "openai_embeddings"
+      ],
+      "engines": [
+        {
+          "model": "glm-5.3-flash",
+          "kind": "vllm_shell",
+          "tensor_parallel_size": 8,
+          "pipeline_parallel_size": 1,
+          "data_parallel_size": 1,
+          "quantization": null,
+          "dtype": "auto",
+          "max_model_len": 312000,
+          "max_concurrency": 8,
+          "prefix_caching": true,
+          "speculative_model": null,
+          "base_url": "http://10.0.0.7:8081/v1",
+          "upstream_models": [
+            "glm-5.3-flash"
+          ],
+          "runtime": "vllm",
+          "profile": "default",
+          "capabilities": [
+            "openai_chat",
+            "openai_completions"
+          ]
+        }
+      ]
+    },
+    {
+      "protocol_version": "3",
+      "name": "nat-forge",
+      "pool": "long",
+      "tiers": [
+        "fast",
+        "long"
+      ],
+      "upstream_models": [
+        "qwen3-32b"
+      ],
+      "base_url": "http://127.0.0.1:9001/v1",
+      "channel": {
+        "mode": "required",
+        "channel_version": "3.1"
+      }
+    },
+    {
+      "protocol_version": "3",
+      "name": "p40-forge",
+      "pool": "long",
+      "tiers": [
+        "long"
+      ],
+      "upstream_models": [
+        "qwen3-32b"
+      ],
+      "base_url": "http://10.0.0.9:9001/v1",
+      "servable_models": [
+        {
+          "name": "qwen3-32b",
+          "loaded": true,
+          "est_vram_gb": 21.5,
+          "est_load_seconds": 45,
+          "kind": "llama_cpp",
+          "context_tokens": 32768
+        },
+        {
+          "name": "gemma-4-26b",
+          "loaded": false,
+          "est_vram_gb": 18.0,
+          "est_load_seconds": 60,
+          "kind": "llama_cpp"
+        }
+      ]
+    }
+  ]
+}

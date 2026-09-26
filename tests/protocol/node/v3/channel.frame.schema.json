@@ -1,0 +1,444 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/channel.frame.schema.json",
+  "title": "WS /v1/nodes/{node_id}/channel frame (v3.1)",
+  "description": "One JSON text frame on the outbound node channel (node protocol v3.1, additive). The node opens the WebSocket with Authorization: Bearer <node_token>; pylon multiplexes HTTP requests over it as numbered streams. See docs/design/outbound-node-channel.md in pylon.",
+  "type": "object",
+  "required": [
+    "type"
+  ],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/hello"
+    },
+    {
+      "$ref": "#/$defs/welcome"
+    },
+    {
+      "$ref": "#/$defs/request"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/data"
+    },
+    {
+      "$ref": "#/$defs/window"
+    },
+    {
+      "$ref": "#/$defs/cancel"
+    },
+    {
+      "$ref": "#/$defs/error"
+    },
+    {
+      "$ref": "#/$defs/ping"
+    },
+    {
+      "$ref": "#/$defs/pong"
+    }
+  ],
+  "$defs": {
+    "streamId": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991,
+      "description": "Stream id, allocated by pylon, unique per channel session."
+    },
+    "body": {
+      "type": "string",
+      "contentEncoding": "base64",
+      "description": "Raw body bytes, base64 (RFC 4648, padded)."
+    },
+    "headers": {
+      "type": "array",
+      "description": "HTTP header list as [name, value] pairs, in order; names are case-insensitive.",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "string"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    },
+    "hello": {
+      "description": "node -> pylon, first frame after the WebSocket opens.",
+      "type": "object",
+      "required": [
+        "type",
+        "channel_version",
+        "protocol_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "hello"
+        },
+        "channel_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "description": "Channel minor version the node speaks (\"3.1\")."
+        },
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/protocolVersion"
+        },
+        "mode": {
+          "$ref": "common.schema.json#/$defs/channelMode"
+        },
+        "max_streams": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Most concurrent streams the node accepts; pylon uses min(this, its own cap)."
+        },
+        "node_name": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "welcome": {
+      "description": "pylon -> node, answer to hello. The node must honour these limits.",
+      "type": "object",
+      "required": [
+        "type",
+        "channel_version",
+        "node_id",
+        "max_frame_bytes",
+        "max_streams",
+        "initial_window",
+        "heartbeat_interval_s"
+      ],
+      "properties": {
+        "type": {
+          "const": "welcome"
+        },
+        "channel_version": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "max_frame_bytes": {
+          "type": "integer",
+          "minimum": 4096,
+          "description": "Largest encoded frame either side may send."
+        },
+        "chunk_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "description": "Largest raw body chunk per data frame."
+        },
+        "max_streams": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "initial_window": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Response bytes the node may send per stream before a window frame."
+        },
+        "heartbeat_interval_s": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "pylon pings this often; either side treats 3 silent intervals as a dead channel."
+        }
+      },
+      "additionalProperties": true
+    },
+    "request": {
+      "description": "pylon -> node: open a stream carrying one HTTP request. A small body rides inline (end_stream true); a larger one follows as data frames.",
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "method",
+        "path",
+        "headers",
+        "end_stream"
+      ],
+      "properties": {
+        "type": {
+          "const": "request"
+        },
+        "id": {
+          "$ref": "#/$defs/streamId"
+        },
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Path at the node root, e.g. /v1/chat/completions. Only the inference paths listed in the design doc are sent; the node refuses others."
+        },
+        "query": {
+          "type": "string"
+        },
+        "headers": {
+          "$ref": "#/$defs/headers"
+        },
+        "body": {
+          "$ref": "#/$defs/body"
+        },
+        "end_stream": {
+          "type": "boolean"
+        },
+        "window": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Initial response window for this stream (defaults to welcome.initial_window)."
+        }
+      },
+      "additionalProperties": true
+    },
+    "response": {
+      "description": "node -> pylon: response status and headers. Exactly once per stream, before any data frame.",
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "status",
+        "headers"
+      ],
+      "properties": {
+        "type": {
+          "const": "response"
+        },
+        "id": {
+          "$ref": "#/$defs/streamId"
+        },
+        "status": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "headers": {
+          "$ref": "#/$defs/headers"
+        }
+      },
+      "additionalProperties": true
+    },
+    "data": {
+      "description": "Body bytes, either direction (request body pylon -> node, response body node -> pylon). end=true closes that direction.",
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "data"
+      ],
+      "properties": {
+        "type": {
+          "const": "data"
+        },
+        "id": {
+          "$ref": "#/$defs/streamId"
+        },
+        "data": {
+          "$ref": "#/$defs/body"
+        },
+        "end": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true
+    },
+    "window": {
+      "description": "pylon -> node: grant more response credit on a stream (bytes consumed).",
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "increment"
+      ],
+      "properties": {
+        "type": {
+          "const": "window"
+        },
+        "id": {
+          "$ref": "#/$defs/streamId"
+        },
+        "increment": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "cancel": {
+      "description": "pylon -> node: abandon a stream (client went away, timeout, flow-control violation). The node stops work and sends nothing more for it.",
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "const": "cancel"
+        },
+        "id": {
+          "$ref": "#/$defs/streamId"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "error": {
+      "description": "node -> pylon: the stream failed on the node. Terminal for the stream.",
+      "type": "object",
+      "required": [
+        "type",
+        "id",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "id": {
+          "$ref": "#/$defs/streamId"
+        },
+        "message": {
+          "type": "string"
+        },
+        "code": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ping": {
+      "description": "Either direction; the peer answers with pong echoing ts.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "ping"
+        },
+        "ts": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "pong": {
+      "description": "Answer to ping.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "pong"
+        },
+        "ts": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "examples": [
+    {
+      "type": "hello",
+      "channel_version": "3.1",
+      "protocol_version": "3",
+      "mode": "preferred",
+      "max_streams": 32,
+      "node_name": "maverick-forge"
+    },
+    {
+      "type": "welcome",
+      "channel_version": "3.1",
+      "node_id": "node-5f2c",
+      "max_frame_bytes": 1048576,
+      "chunk_bytes": 65536,
+      "max_streams": 32,
+      "initial_window": 1048576,
+      "heartbeat_interval_s": 15
+    },
+    {
+      "type": "request",
+      "id": 1,
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "query": "",
+      "headers": [
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "authorization",
+          "Bearer node-inference-key"
+        ]
+      ],
+      "body": "eyJtb2RlbCI6InF3ZW4zLTMyYiIsInN0cmVhbSI6dHJ1ZX0=",
+      "end_stream": true,
+      "window": 1048576
+    },
+    {
+      "type": "response",
+      "id": 1,
+      "status": 200,
+      "headers": [
+        [
+          "content-type",
+          "text/event-stream"
+        ]
+      ]
+    },
+    {
+      "type": "data",
+      "id": 1,
+      "data": "ZGF0YTogW0RPTkVdCgo=",
+      "end": true
+    },
+    {
+      "type": "window",
+      "id": 1,
+      "increment": 65536
+    },
+    {
+      "type": "cancel",
+      "id": 1,
+      "reason": "client"
+    },
+    {
+      "type": "error",
+      "id": 2,
+      "message": "upstream connect failed",
+      "code": "upstream"
+    },
+    {
+      "type": "ping",
+      "ts": 1790000000.5
+    },
+    {
+      "type": "pong",
+      "ts": 1790000000.5
+    }
+  ]
+}

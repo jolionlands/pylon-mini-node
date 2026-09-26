@@ -18,6 +18,8 @@ Trade-off vs forge:
 | Slot supervisor / LoRA admin / hot reload | no | yes |
 | Multi-engine on one box | no (one engine per process) | yes |
 | Heartbeats in_flight + vram | yes | yes |
+| Node protocol v3 (`protocol_version`, `instance_id`, host telemetry) | yes | yes |
+| Reports `busy` when the engine is unhealthy | yes | yes (0.27+) |
 | Re-registers on pylon drop | yes | yes |
 | Probes /slots for busy count | yes (llama.cpp) | yes |
 
@@ -94,6 +96,9 @@ Recommended:
 | `NODE_ENGINE_API_KEY` | Bearer token for engine (if it needs one) | (none) |
 | `NODE_VRAM_SYSFS_CARD` | Path like `/sys/class/drm/card0/device` to read live VRAM | (none) |
 | `NODE_ADVERTISED_BASE_URL` | URL pylon should proxy to, when different from the probe URL. Use when pylon and the engine are in different network namespaces (e.g. pylon in a docker container without `--network host`). | (uses `NODE_BASE_URL`) |
+| `NODE_INSTANCE_ID` | Stable node identity sent on register (protocol v3 `instance_id`, max 128 chars). Keep it constant across restarts so pylon sees the same node. | `<hostname>:<engine port>` |
+| `NODE_DISK_PATH` | Filesystem whose size and free space are reported (`disk_total_bytes`/`disk_free_bytes`) | `.` (working directory) |
+| `ENGINE_PROBE_TIMEOUT_SECONDS` | Timeout of the engine health probe (`/v1/models`) | `3.0` |
 
 ## Wire-up examples
 
@@ -136,12 +141,19 @@ python3 pylon_mini_node.py
 
 ## What gets reported
 
+mini-node speaks pylon [node protocol v3](https://github.com/jolionlands/pylon/tree/main/protocol/node/v3). Register and every heartbeat carry `protocol_version: "3"`, and register carries `instance_id`. `tests/protocol/node/v3` is a vendored copy of pylon's schemas. `tests/test_protocol_v3.py` checks that the register and heartbeat bodies mini-node actually sends validate against them. Set `PYLON_PROTOCOL_DIR=<pylon>/protocol/node/v3` to test against a pylon checkout instead.
+
 Per heartbeat (default every 10s):
-- `state`: `ready` when engine `/v1/models` answers 2xx, else `stopped`
+- `state`: `ready` when engine `/v1/models` answers 2xx. Otherwise it is `busy`, with the probe failure in `last_error`. Pylon keeps a `busy` node registered but stops routing to it, and the next healthy heartbeat flips it back to `ready`. This is the same rule forge follows from 0.27. Older mini-nodes sent `stopped`, which is not a v3 state.
+- host telemetry, with the same fields and sources as forge: `process_uptime_seconds`, `disk_total_bytes`/`disk_free_bytes` (of `NODE_DISK_PATH`), `network_rx_bytes`/`network_tx_bytes` (non-loopback interfaces from `/proc/net/dev`) and `memory_total_bytes`/`memory_available_bytes` (`/proc/meminfo`). A value that cannot be read on the platform is left out.
 - `in_flight`: count of `is_processing` slots (or `task_id != -1` for older llama-server builds)
 - `vram_used_gb`: read from `NODE_VRAM_SYSFS_CARD/mem_info_vram_used` when configured
 - `vram_total_gb`: `NODE_VRAM_GB` value when configured
 - `queue_depth`, `pending_tokens`: 0 (mini-node doesn't proxy requests; pylon talks to the engine directly)
+
+## Tests
+
+Stdlib only, one file at a time: `python tests/test_mini_node.py` and `python tests/test_protocol_v3.py`. pytest works too. The protocol test uses `jsonschema` when it is installed, and otherwise uses a small built-in validator for the keywords the schemas use.
 
 ## Re-registration
 

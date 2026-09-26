@@ -1,0 +1,266 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/heartbeat.request.schema.json",
+  "title": "POST /v1/nodes/{node_id}/heartbeat request",
+  "description": "Periodic liveness + telemetry. Every field except protocol_version is optional; omitted fields leave pylon's stored value unchanged. An explicit empty engines/upstream_models list clears it.",
+  "type": "object",
+  "required": [
+    "protocol_version"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/protocolVersion"
+    },
+    "in_flight": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "state": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "ready",
+        "draining",
+        "busy",
+        "offline",
+        null
+      ]
+    },
+    "last_error": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "draining": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "vram_used_gb": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "vram_total_gb": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "queue_depth": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "pending_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "gpu_vram_percent": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "gpu_metrics_source": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        "both",
+        "prefill",
+        "decode",
+        null
+      ]
+    },
+    "backend_pool": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "engines": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "common.schema.json#/$defs/heartbeatEngine"
+      }
+    },
+    "upstream_models": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "slots": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "common.schema.json#/$defs/slotTiming"
+      }
+    },
+    "disk_total_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "disk_free_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "process_uptime_seconds": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "network_rx_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "network_tx_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "memory_total_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "memory_available_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "servable_models": {
+      "$ref": "placement.schema.json#/$defs/servableModels"
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "protocol_version": "3",
+      "in_flight": 0,
+      "state": "ready",
+      "last_error": null,
+      "pending_tokens": 0
+    },
+    {
+      "protocol_version": "3",
+      "in_flight": 2,
+      "state": "ready",
+      "last_error": null,
+      "pending_tokens": 4096,
+      "vram_used_gb": 20.5,
+      "vram_total_gb": 24.0,
+      "gpu_vram_percent": 0.85,
+      "queue_depth": 1,
+      "disk_total_bytes": 1000000000000,
+      "disk_free_bytes": 400000000000,
+      "process_uptime_seconds": 3600,
+      "memory_total_bytes": 17179869184,
+      "memory_available_bytes": 8589934592,
+      "engines": [
+        {
+          "model": "qwen3-32b",
+          "base_url": "http://10.0.0.5:8081/v1",
+          "slots": [
+            {
+              "id": 0,
+              "n_ctx": 32768,
+              "is_processing": false
+            }
+          ]
+        }
+      ],
+      "upstream_models": [
+        "qwen3-32b"
+      ],
+      "slots": [
+        {
+          "engine": "qwen3-32b",
+          "slot_id": 0,
+          "hit_ratio_1m": 0.9,
+          "save_ms_p50": 12.0,
+          "restore_ms_p50": 8.0
+        }
+      ]
+    },
+    {
+      "protocol_version": "3",
+      "in_flight": 0,
+      "state": "draining",
+      "gpu_metrics_source": "disabled"
+    },
+    {
+      "protocol_version": "3",
+      "in_flight": 0,
+      "state": "ready",
+      "pending_tokens": 0,
+      "vram_used_gb": 22.0,
+      "vram_total_gb": 48.0,
+      "servable_models": [
+        {
+          "name": "qwen3-32b",
+          "loaded": true,
+          "est_vram_gb": 21.5,
+          "est_load_seconds": 45
+        },
+        {
+          "name": "gemma-4-26b",
+          "loaded": false,
+          "est_vram_gb": 18.0,
+          "est_load_seconds": 60
+        }
+      ]
+    }
+  ]
+}

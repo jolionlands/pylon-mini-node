@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/heartbeat.response.schema.json",
+  "title": "POST /v1/nodes/{node_id}/heartbeat response",
+  "description": "Echoes pylon's current view of the node.",
+  "type": "object",
+  "required": [
+    "node"
+  ],
+  "properties": {
+    "node": {
+      "$ref": "common.schema.json#/$defs/node"
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "node": {
+        "id": "n_1",
+        "name": "maverick-forge",
+        "pool": "long",
+        "state": "ready"
+      }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/lease.request.schema.json",
+  "title": "POST /v1/nodes/{node_id}/lease query parameters",
+  "description": "Lease parameters travel as query parameters, not a body. Operator nodes only.",
+  "type": "object",
+  "required": [
+    "kind"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ttl_seconds": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "kind": "chat",
+      "ttl_seconds": 600
+    }
+  ]
+}

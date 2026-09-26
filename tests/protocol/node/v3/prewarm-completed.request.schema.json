@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/prewarm-completed.request.schema.json",
+  "title": "POST /v1/nodes/{node_id}/prewarm/completed request (node -> pylon callback)",
+  "description": "Telemetry callback after a prewarm attempt. Best-effort on the node side.",
+  "type": "object",
+  "required": [
+    "prefix_hash",
+    "success",
+    "latency_ms"
+  ],
+  "properties": {
+    "prefix_hash": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "latency_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tenant_id": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "prefix_hash": "ab12cd34",
+      "project_id": "proj-1",
+      "success": true,
+      "latency_ms": 850,
+      "reason": null
+    },
+    {
+      "prefix_hash": "ab12cd34",
+      "project_id": null,
+      "success": false,
+      "latency_ms": 12,
+      "reason": "engine opted out",
+      "tenant_id": 7
+    }
+  ]
+}

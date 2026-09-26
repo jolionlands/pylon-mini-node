@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jolionlands/pylon/protocol/node/v3/prewarm.request.schema.json",
+  "title": "POST {node_root}/prewarm request (pylon -> node)",
+  "description": "Best-effort KV prefill of a stable prefix. Sent to the node root, not under /v1.",
+  "type": "object",
+  "required": [
+    "prefix_hash",
+    "messages"
+  ],
+  "properties": {
+    "prefix_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "project_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "expected_max_prompt_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "tenant_id": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "additionalProperties": true,
+  "examples": [
+    {
+      "prefix_hash": "ab12cd34",
+      "project_id": "proj-1",
+      "expected_max_prompt_tokens": 12000,
+      "tenant_id": 7,
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are helpful."
+        }
+      ]
+    }
+  ]
+}
